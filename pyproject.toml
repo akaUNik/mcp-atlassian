@@ -170,4 +170,4 @@ source = "uv-dynamic-versioning"
 vcs = "git"
 style = "pep440"
 bump = true
-fallback-version = "0.24.0b1"
+fallback-version = "0.24.0b2"

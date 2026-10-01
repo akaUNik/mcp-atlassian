@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.24.0-beta.2] - 2026-10-01
+
+### Fixed
+
+- Normalize SemVer Docker prerelease tags to PEP 440 before installing the Python
+  package, so beta and release-candidate images build successfully (#3).
+
+### Validation
+
+- Full pytest suite: 4014 passed, 251 skipped; all pre-commit hooks passed.
+- Docker version regression tests pass for stable, beta, and rc tags, with both
+  initial and already versioned package fallbacks.
+- Includes all PAT + mTLS functionality and validation from beta.1.
+- Secret Scanning still flags the synthetic URI fixture recorded below.
+
 ## [0.24.0-beta.1] - 2026-10-01
 
 ### Added
