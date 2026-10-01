@@ -380,6 +380,8 @@ def test_apply_proxy_configuration_wraps_session_for_wpad():
     source_session.headers["X-Test"] = "1"
     source_session.cookies.set("cookie", "value")
     source_session.trust_env = False
+    source_session.verify = "/test/ca.pem"
+    source_session.cert = ("/test/cert.pem", "/test/key.pem")
     response_hook = MagicMock()
     source_session.hooks["response"].append(response_hook)
     custom_adapter = HTTPAdapter()
@@ -431,6 +433,8 @@ def test_apply_proxy_configuration_wraps_session_for_wpad():
     assert pac_session.headers["X-Test"] == "1"
     assert pac_session.cookies.get("cookie") == "value"
     assert pac_session.trust_env is False
+    assert pac_session.verify == "/test/ca.pem"
+    assert pac_session.cert == ("/test/cert.pem", "/test/key.pem")
     assert pac_session.hooks["response"] == [response_hook]
     assert pac_session.get_adapter("https://example.com") is custom_adapter
 

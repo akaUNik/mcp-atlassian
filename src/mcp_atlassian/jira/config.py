@@ -192,6 +192,8 @@ class JiraConfig:
     # internal-only (non-customer-visible) comments. See
     # JIRA_INTERNAL_ONLY_PROJECTS. Empty by default (guard disabled).
 
+    ca_cert: str | None = None  # Explicit PEM CA bundle for server verification
+
     @property
     def is_cloud(self) -> bool:
         """Check if this is a cloud instance.
@@ -367,6 +369,7 @@ class JiraConfig:
             personal_token=personal_token,
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
+            ca_cert=os.getenv("JIRA_CA_CERT", "").strip() or None,
             projects_filter=projects_filter,
             http_proxy=proxy_settings["http_proxy"],
             https_proxy=proxy_settings["https_proxy"],

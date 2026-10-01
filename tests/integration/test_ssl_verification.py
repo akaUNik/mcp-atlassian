@@ -1,9 +1,19 @@
 """Integration tests for SSL verification functionality."""
 
 import os
+import ssl
+import threading
+from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
+import truststore
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from requests.exceptions import SSLError
 from requests.sessions import Session
 
@@ -13,6 +23,198 @@ from mcp_atlassian.jira.config import JiraConfig
 from mcp_atlassian.utils.ssl import SSLIgnoreAdapter, configure_ssl_verification
 from tests.utils.base import BaseAuthTest
 from tests.utils.mocks import MockEnvironment
+
+
+@pytest.fixture(scope="module")
+def mtls_material(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """Generate disposable CA, server and client identities without secrets."""
+    directory = tmp_path_factory.mktemp("jira-mtls")
+    now = datetime.now(timezone.utc)
+
+    def issue(
+        name: str,
+        ca: x509.Certificate | None = None,
+        signer: rsa.RSAPrivateKey | None = None,
+        usage: x509.ObjectIdentifier | None = None,
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca.subject if ca else subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(days=1))
+            .add_extension(
+                x509.BasicConstraints(ca=ca is None, path_length=None), critical=True
+            )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                    (signer or key).public_key()
+                ),
+                critical=False,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=ca is not None,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=ca is None,
+                    crl_sign=ca is None,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+        )
+        if usage:
+            builder = builder.add_extension(
+                x509.ExtendedKeyUsage([usage]), critical=False
+            )
+        if usage == ExtendedKeyUsageOID.SERVER_AUTH:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False
+            )
+        cert = builder.sign(signer or key, hashes.SHA256())
+        (directory / f"{name}.pem").write_bytes(
+            cert.public_bytes(serialization.Encoding.PEM)
+        )
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        (directory / f"{name}.key").write_bytes(key_pem)
+        (directory / f"{name}-combined.pem").write_bytes(
+            cert.public_bytes(serialization.Encoding.PEM) + key_pem
+        )
+        return cert, key
+
+    ca, ca_key = issue("ca")
+    issue("wrong-ca")
+    issue("server", ca, ca_key, ExtendedKeyUsageOID.SERVER_AUTH)
+    issue("client", ca, ca_key, ExtendedKeyUsageOID.CLIENT_AUTH)
+    return {
+        name: str(directory / name)
+        for name in [
+            "ca.pem",
+            "wrong-ca.pem",
+            "server.pem",
+            "server.key",
+            "client-combined.pem",
+        ]
+    }
+
+
+@pytest.fixture
+def mtls_server(
+    mtls_material: dict[str, str],
+) -> Iterator[tuple[str, list[tuple[str, str | None]]]]:
+    """Serve Jira-shaped read responses only after successful client TLS auth."""
+    received: list[tuple[str, str | None]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            received.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"name": "test-user"}')
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # truststore verifies client-side peer chains and cannot wrap a listening
+    # server socket. Use stdlib SSL only for the test server, keeping the Jira
+    # client on the application's configured TLS stack.
+    system_trust = ssl.SSLContext is truststore.SSLContext
+    if system_trust:
+        truststore.extract_from_ssl()
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            mtls_material["server.pem"], mtls_material["server.key"]
+        )
+        context.load_verify_locations(cafile=mtls_material["ca.pem"])
+        context.verify_mode = ssl.CERT_REQUIRED
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    finally:
+        if system_trust:
+            truststore.inject_into_ssl()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://localhost:{server.server_port}/jira/", received
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("failure", [None, "missing-client", "wrong-ca", "hostname"])
+@pytest.mark.parametrize("direct_session", [False, True])
+def test_pat_verified_mtls_transport(
+    mtls_material: dict[str, str],
+    mtls_server: tuple[str, list[tuple[str, str | None]]],
+    failure: str | None,
+    direct_session: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TLS requires trusted server identity and client identity on both paths."""
+    url, received = mtls_server
+    if failure == "hostname":
+        url = url.replace("localhost", "127.0.0.1")
+    monkeypatch.setenv("JIRA_URL", url)
+    monkeypatch.setattr(
+        "mcp_atlassian.jira.client.logger.isEnabledFor", lambda _: False
+    )
+    config = JiraConfig(
+        url=url,
+        auth_type="pat",
+        personal_token="synthetic-pat",
+        timeout=3,
+        ca_cert=mtls_material["wrong-ca.pem" if failure == "wrong-ca" else "ca.pem"],
+        client_cert=None
+        if failure == "missing-client"
+        else mtls_material["client-combined.pem"],
+    )
+    client = JiraClient(config)
+    session = client.jira._session
+    try:
+        if failure:
+            with pytest.raises(SSLError):
+                if direct_session:
+                    session.get(url + "attachment", timeout=3)
+                else:
+                    client.jira.myself()
+            assert received == []
+        else:
+            result = (
+                session.get(url + "attachment", timeout=3).json()
+                if direct_session
+                else client.jira.myself()
+            )
+            assert result == {"name": "test-user"}
+            assert received == [
+                (
+                    "/jira/attachment" if direct_session else "/jira/rest/api/2/myself",
+                    "Bearer synthetic-pat",
+                )
+            ]
+        assert config.ssl_verify is True
+        assert session.verify == config.ca_cert
+    finally:
+        session.close()
 
 
 @pytest.mark.integration
@@ -142,10 +344,12 @@ class TestSSLVerificationEnhanced(BaseAuthTest):
                 )  # Any non-false value becomes True
 
     @pytest.mark.integration
-    def test_ssl_adapter_not_mounted_when_verification_enabled(self):
+    def test_ssl_adapter_not_mounted_when_verification_enabled(self, monkeypatch):
         """Test that SSL adapters are not mounted when verification is enabled."""
         session = Session()
         original_adapter_count = len(session.adapters)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
 
         # Configure with SSL verification enabled
         configure_ssl_verification(

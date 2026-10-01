@@ -73,6 +73,7 @@ def issues_mixin():
     """Fixture to create an instance of IssuesMixin with a mocked jira client."""
     with patch("mcp_atlassian.jira.config.JiraConfig.from_env") as mock_from_env:
         mock_config = MagicMock()
+        mock_config.ca_cert = None
         mock_config.is_cloud = True
         mock_config.url = "https://test.atlassian.net"
         mock_config.ssl_verify = True

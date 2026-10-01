@@ -17,6 +17,8 @@ from mcp_atlassian.servers.dependencies import (
     _confluence_spec,
     _create_and_validate,
     _create_user_config_for_fetcher,
+    _get_header_pat_network_config,
+    _jira_spec,
     _resolve_bearer_auth_type,
     _validation_cache,
     _validation_cache_scope,
@@ -30,6 +32,143 @@ from tests.utils.mocks import MockFastMCP
 
 # Configure pytest for async tests
 pytestmark = pytest.mark.anyio
+
+
+@pytest.mark.parametrize("env_fallback", [False, True])
+@pytest.mark.parametrize(
+    "target, inherits",
+    [
+        ("https://sberworks.ru/jira", True),
+        ("https://SBERWORKS.ru/jira/", True),
+        ("https://sberworks.ru:443/jira/", True),
+        ("https://sberworks.ru.evil.example/jira/", False),
+        ("http://sberworks.ru/jira/", False),
+        ("https://sberworks.ru:444/jira/", False),
+        ("https://sberworks.ru:0/jira/", False),
+        ("https://sberworks.ru/Jira/", False),
+        ("https://sberworks.ru/other/", False),
+        ("https://user@sberworks.ru/jira/", False),
+        ("https://user:password@sberworks.ru/jira/", False),
+        ("https://sberworks.ru/jira/?anything", False),
+        ("https://sberworks.ru/jira/#fragment", False),
+        ("https://sberworks.ru/jira/?", False),
+        ("https://sberworks.ru/jira/#", False),
+    ],
+)
+def test_header_jira_tls_instance_scope(
+    target: str,
+    inherits: bool,
+    env_fallback: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only equivalent operator URLs inherit CA and certificate identity."""
+    tls = {
+        "ca_cert": "/test/ca.pem",
+        "client_cert": "/test/cert.pem",
+        "client_key": "/test/key.pem",
+        "client_key_password": "unsupported",
+    }
+    config = JiraConfig(url="https://sberworks.ru/jira/", auth_type="pat", **tls)
+    monkeypatch.setenv("JIRA_URL", config.url)
+    for name, value in tls.items():
+        monkeypatch.setenv("JIRA_" + name.upper(), value)
+    with patch(
+        "mcp_atlassian.servers.dependencies._get_global_config",
+        side_effect=ValueError if env_fallback else None,
+        return_value=config,
+    ):
+        network = _get_header_pat_network_config(MagicMock(), _jira_spec(), target)
+    for name, value in tls.items():
+        assert network.get(name) == (value if inherits else None)
+
+
+def test_header_tls_no_operator_url_and_confluence_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No operator Jira URL or a Confluence request leaves identity unset."""
+    monkeypatch.delenv("JIRA_URL", raising=False)
+    monkeypatch.setenv("JIRA_CA_CERT", "/test/ca.pem")
+    monkeypatch.setenv("JIRA_CLIENT_CERT", "/test/cert.pem")
+    with patch(
+        "mcp_atlassian.servers.dependencies._get_global_config", side_effect=ValueError
+    ):
+        for spec in [_jira_spec(), _confluence_spec()]:
+            network = _get_header_pat_network_config(
+                MagicMock(), spec, "https://sberworks.ru/jira/"
+            )
+            assert "ca_cert" not in network
+            assert "client_cert" not in network
+
+
+@pytest.mark.parametrize("env_fallback", [False, True])
+async def test_header_pat_retains_user_token_and_operator_tls(
+    env_fallback: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Header PAT construction keeps the user's token and the operator's TLS."""
+    tls = {
+        "ca_cert": "/test/ca.pem",
+        "client_cert": "/test/cert.pem",
+        "client_key": "/test/key.pem",
+    }
+    config = JiraConfig(
+        url="https://sberworks.ru/jira/",
+        auth_type="pat",
+        personal_token="operator-token",
+        **tls,
+    )
+    monkeypatch.setenv("JIRA_URL", config.url)
+    for name, value in tls.items():
+        monkeypatch.setenv("JIRA_" + name.upper(), value)
+    request = MagicMock()
+    request.state = SimpleNamespace(
+        user_atlassian_auth_type="pat",
+        atlassian_service_headers={
+            "X-Atlassian-Jira-Url": "https://SBERWORKS.ru:443/jira",
+            "X-Atlassian-Jira-Personal-Token": "user-token",
+        },
+    )
+    with (
+        patch(
+            "mcp_atlassian.servers.dependencies.get_http_request", return_value=request
+        ),
+        patch(
+            "mcp_atlassian.servers.dependencies._get_global_config",
+            side_effect=ValueError if env_fallback else None,
+            return_value=config,
+        ),
+        patch("mcp_atlassian.servers.dependencies.JiraFetcher") as fetcher_class,
+    ):
+        fetcher_class.return_value = _create_mock_fetcher(JiraFetcher)
+        await get_jira_fetcher(MagicMock())
+    created = fetcher_class.call_args.kwargs["config"]
+    assert created.personal_token == "user-token"
+    for name, value in tls.items():
+        assert getattr(created, name) == value
+
+
+@pytest.mark.parametrize(
+    "auth_type, credentials",
+    [
+        ("pat", {"personal_access_token": "user-pat"}),
+        ("basic", {"user_email": "user", "api_token": "user-api-token"}),
+    ],
+)
+def test_per_user_config_preserves_jira_tls(
+    auth_type: str, credentials: dict[str, str]
+) -> None:
+    """dataclasses.replace retains all operator TLS fields."""
+    config = JiraConfig(
+        url="https://sberworks.ru/jira/",
+        auth_type="pat",
+        ca_cert="/test/ca.pem",
+        client_cert="/test/cert.pem",
+        client_key="/test/key.pem",
+        client_key_password="unsupported",
+    )
+    cloned = _create_user_config_for_fetcher(config, auth_type, credentials)
+    for name in ["ca_cert", "client_cert", "client_key", "client_key_password"]:
+        assert getattr(cloned, name) == getattr(config, name)
 
 
 @pytest.fixture(autouse=True)

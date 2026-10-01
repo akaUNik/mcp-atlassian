@@ -4,6 +4,7 @@ import logging
 import os
 import ssl
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,6 +20,33 @@ from .ssrf_adapter import (
 )
 
 logger = logging.getLogger("mcp-atlassian")
+
+
+def validate_ca_cert(ca_cert: str | None, ssl_verify: bool) -> None:
+    """Validate an explicit PEM CA bundle before credentials are sent.
+
+    Args:
+        ca_cert: Optional path to a readable regular PEM file.
+        ssl_verify: Whether server certificate verification is enabled.
+
+    Raises:
+        ValueError: If verification is disabled or the CA bundle is invalid.
+    """
+    if ca_cert is None:
+        return
+    if not ssl_verify:
+        raise ValueError("JIRA_CA_CERT conflicts with JIRA_SSL_VERIFY=false")
+    try:
+        path = Path(ca_cert)
+        if not path.is_file():
+            raise OSError("CA bundle is not a regular file")
+        pem = path.read_text(encoding="ascii")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=pem)
+    except (OSError, UnicodeError, ssl.SSLError):
+        raise ValueError(
+            "JIRA_CA_CERT must be a readable, valid PEM CA bundle"
+        ) from None
 
 
 class NoProxyAdapter(SsrfPinningAdapter):
@@ -149,7 +177,9 @@ class SSLIgnoreAdapter(NoProxyAdapter):
             "https": _PinnedHTTPSConnectionPool,
         }
 
-    def cert_verify(self, conn: Any, url: str, verify: bool, cert: Any | None) -> None:
+    def cert_verify(
+        self, conn: Any, url: str, verify: bool | str, cert: Any | None
+    ) -> None:
         """Override cert verification to disable SSL verification.
 
         This method is still included for backward compatibility, but the main
@@ -239,6 +269,7 @@ def configure_ssl_verification(
     client_key: str | None = None,
     client_key_password: str | None = None,
     no_proxy: str | None = None,
+    ca_cert: str | None = None,
 ) -> None:
     """Configure SSL verification and client certificates for a specific service.
 
@@ -262,7 +293,11 @@ def configure_ssl_verification(
         client_key_password: Password for encrypted private key (optional)
         no_proxy: The no-proxy list to honor on the mounted adapter. Defaults to
             the ``NO_PROXY`` environment variable when not provided.
+        ca_cert: Optional PEM CA bundle used for server certificate verification.
     """
+    validate_ca_cert(ca_cert, ssl_verify)
+    if ca_cert is not None:
+        session.verify = ca_cert
     no_proxy = no_proxy or os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
     # Configure client certificate if provided (must be actual string paths).
     # requests accepts either a combined PEM path or a (cert, key) tuple.
