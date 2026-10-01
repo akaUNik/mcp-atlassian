@@ -11,6 +11,32 @@ from mcp_atlassian.utils.oauth import OAuthConfig
 from mcp_atlassian.utils.proxy import DEFAULT_PROXY_WPAD_URL
 
 
+@pytest.mark.parametrize("ca_cert", [None, "", "   ", "/test/ca.pem"])
+@pytest.mark.parametrize(
+    "ssl_value, expected", [("true", True), ("false", False), ("/ca.pem", True)]
+)
+def test_sberworks_pat_ca_config(
+    ca_cert: str | None, ssl_value: str, expected: bool
+) -> None:
+    """CA configuration preserves PAT precedence and boolean SSL parsing."""
+    env = {
+        "JIRA_URL": "https://sberworks.ru/jira/",
+        "JIRA_PERSONAL_TOKEN": "test-pat",
+        "JIRA_CLIENT_CERT": "/test/combined.pem",
+        "JIRA_SSL_VERIFY": ssl_value,
+    }
+    if ca_cert is not None:
+        env["JIRA_CA_CERT"] = ca_cert
+    with patch.dict(os.environ, env, clear=True):
+        config = JiraConfig.from_env()
+    assert config.auth_type == "pat"
+    assert config.personal_token == "test-pat"
+    assert config.is_cloud is False
+    assert config.ca_cert == (ca_cert.strip() or None if ca_cert else None)
+    assert config.ssl_verify is expected
+    assert config.verify_ssl is expected
+
+
 def test_from_env_basic_auth():
     """Test that from_env correctly loads basic auth configuration."""
     with patch.dict(

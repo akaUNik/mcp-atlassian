@@ -24,7 +24,7 @@ from mcp_atlassian.utils.logging import (
 )
 from mcp_atlassian.utils.oauth import configure_oauth_session
 from mcp_atlassian.utils.proxy import apply_proxy_configuration
-from mcp_atlassian.utils.ssl import configure_ssl_verification
+from mcp_atlassian.utils.ssl import configure_ssl_verification, validate_ca_cert
 from mcp_atlassian.utils.ssrf_adapter import mount_ssrf_pinning
 from mcp_atlassian.utils.urls import make_ssrf_redirect_hook
 from mcp_atlassian.utils.user_agent import get_default_user_agent
@@ -57,6 +57,8 @@ class JiraClient:
         """
         # Load configuration from environment variables if not provided
         self.config = config or JiraConfig.from_env()
+        validate_ca_cert(self.config.ca_cert, self.config.ssl_verify)
+        verify_ssl = self.config.ca_cert or self.config.ssl_verify
         transport_url = self.config.url
 
         # Initialize the Jira client based on auth type
@@ -97,7 +99,7 @@ class JiraClient:
                 url=api_url,
                 session=session,
                 cloud=is_cloud,
-                verify_ssl=self.config.ssl_verify,
+                verify_ssl=verify_ssl,
                 timeout=self.config.timeout,
             )
         elif self.config.auth_type == "pat":
@@ -110,7 +112,7 @@ class JiraClient:
                 url=self.config.url,
                 token=self.config.personal_token,
                 cloud=self.config.is_cloud,
-                verify_ssl=self.config.ssl_verify,
+                verify_ssl=verify_ssl,
                 timeout=self.config.timeout,
             )
         elif self.config.auth_type == "cert":
@@ -122,7 +124,7 @@ class JiraClient:
             self.jira = Jira(
                 url=self.config.url,
                 cloud=self.config.is_cloud,
-                verify_ssl=self.config.ssl_verify,
+                verify_ssl=verify_ssl,
                 timeout=self.config.timeout,
             )
             self.jira._session.trust_env = False
@@ -137,7 +139,7 @@ class JiraClient:
                 url=self.config.url,
                 session=session,
                 cloud=self.config.is_cloud,
-                verify_ssl=self.config.ssl_verify,
+                verify_ssl=verify_ssl,
                 timeout=self.config.timeout,
             )
             # Ensure no Authorization header is carried over from defaults
@@ -154,7 +156,7 @@ class JiraClient:
                 username=self.config.username,
                 password=self.config.api_token,
                 cloud=self.config.is_cloud,
-                verify_ssl=self.config.ssl_verify,
+                verify_ssl=verify_ssl,
                 timeout=self.config.timeout,
             )
             logger.debug(
@@ -181,7 +183,11 @@ class JiraClient:
             client_key=self.config.client_key,
             client_key_password=self.config.client_key_password,
             no_proxy=self.config.no_proxy,
+            ca_cert=self.config.ca_cert,
         )
+        # The Atlassian library keeps per-request TLS state separately from
+        # Requests' session defaults. Keep both paths consistent.
+        self.jira.cert = self.jira._session.cert
 
         # Validate redirects for SSRF on every outbound call from this session
         # (covers direct _session.get() paths and global/stdio fetchers, not just

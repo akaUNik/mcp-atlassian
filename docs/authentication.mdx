@@ -97,7 +97,26 @@ openssl rsa -in encrypted.key -out decrypted.key
 </Warning>
 
 <Note>
-If your Server/DC instance uses a self-signed or internal CA certificate alongside mTLS, set `JIRA_SSL_VERIFY=false` and/or `CONFLUENCE_SSL_VERIFY=false` as well.
+For Jira with an internal CA, set `JIRA_CA_CERT` to a readable PEM CA bundle
+and keep `JIRA_SSL_VERIFY=true`. Unset or blank `JIRA_CA_CERT` retains the
+existing trust defaults; a CA bundle conflicts with disabled verification.
+Confluence continues to use its existing trust configuration, including the
+OS trust store.
+
+PAT and mTLS can be used together on Server/DC:
+
+```bash
+JIRA_URL=https://sberworks.ru/jira/
+JIRA_PERSONAL_TOKEN=<YOUR_PAT>
+JIRA_CLIENT_CERT=/etc/mcp-atlassian/client-combined.pem
+JIRA_CA_CERT=/etc/mcp-atlassian/ca.pem
+JIRA_SSL_VERIFY=true
+```
+
+The PAT remains the Bearer authorization credential while the certificate
+authenticates the TLS connection. A combined PEM includes the certificate
+and unencrypted private key; for separate files, also set `JIRA_CLIENT_KEY`.
+Encrypted private keys remain unsupported, including when a PAT is present.
 </Note>
 
 <Note>

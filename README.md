@@ -78,6 +78,89 @@ Ask your AI assistant to:
 - **"Create a bug ticket for the login issue"**
 - **"Update the status of PROJ-123 to Done"**
 
+## SberWorks: Run the Beta on Another Laptop
+
+These instructions use the
+[v0.24.0-beta.2 release](https://github.com/akaUNik/mcp-atlassian/releases/tag/v0.24.0-beta.2)
+with Jira PAT authentication and verified mTLS. The Docker image supports Linux
+amd64 and arm64; no source checkout is required. The commands below are for
+macOS/Linux with Docker installed and running. Connect to the corporate network
+or VPN required to reach SberWorks.
+
+### 1. Prepare Certificates and Credentials
+
+Create a local directory:
+
+```bash
+mkdir -p ~/mcp-sberworks/certs
+```
+
+Transfer the certificates through a secure channel and save them as:
+
+- `~/mcp-sberworks/certs/client-combined.pem`: the client certificate and its
+  unencrypted private key in one PEM file.
+- `~/mcp-sberworks/certs/ca.pem`: the trusted CA bundle in PEM format.
+
+Create `~/mcp-sberworks/.env`, replacing `<YOUR_PAT>` with your Jira PAT:
+
+```dotenv
+JIRA_URL=https://sberworks.ru/jira/
+JIRA_PERSONAL_TOKEN=<YOUR_PAT>
+JIRA_CLIENT_CERT=/certs/client-combined.pem
+JIRA_CA_CERT=/certs/ca.pem
+JIRA_SSL_VERIFY=true
+READ_ONLY_MODE=true
+```
+
+If your `.env.pat` contains only the raw token, use that value for
+`JIRA_PERSONAL_TOKEN`; Docker's `--env-file` requires `NAME=value` entries.
+The certificate paths above refer to files **inside the container**. Keep the
+PAT and private key outside Git.
+
+### 2. Start the Server
+
+Restrict access to the credentials and run the container:
+
+```bash
+chmod 600 ~/mcp-sberworks/.env ~/mcp-sberworks/certs/client-combined.pem
+
+docker run --rm --name sberworks-jira \
+  --user "$(id -u):$(id -g)" \
+  --env-file "$HOME/mcp-sberworks/.env" \
+  --mount "type=bind,source=$HOME/mcp-sberworks/certs,target=/certs,readonly" \
+  -p 127.0.0.1:8000:8000 \
+  ghcr.io/akaunik/mcp-atlassian:0.24.0-beta.2 \
+  --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+The container runs with your host user ID so it can read the restricted client
+PEM. Certificates are mounted read-only, and the published port is accessible
+only from the same laptop. Keep this terminal running; press `Ctrl+C` to stop
+the server.
+
+### 3. Connect Your MCP Client and Test
+
+In an MCP client that supports **Streamable HTTP**, add this server URL:
+
+```text
+http://localhost:8000/mcp
+```
+
+Ask the client to find one Jira issue visible to your account. Initial testing
+uses `READ_ONLY_MODE=true`, which blocks write tools. Keep
+`JIRA_SSL_VERIFY=true` to verify the server certificate.
+
+To check the installed image version separately:
+
+```bash
+docker run --rm ghcr.io/akaunik/mcp-atlassian:0.24.0-beta.2 --version
+```
+
+The expected Python package version is `0.24.0b2`. See
+[configuration](docs/configuration.mdx#sberworks-jira-pat-plus-mtls) and the
+[read-only smoke check](docs/troubleshooting.mdx#sberworks-read-only-smoke-check)
+for separate certificate/key files, proxy settings, and troubleshooting.
+
 ## Documentation
 
 Full documentation is available at **[mcp-atlassian.soomiles.com](https://mcp-atlassian.soomiles.com)**.

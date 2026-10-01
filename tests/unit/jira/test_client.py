@@ -2,15 +2,147 @@
 
 import os
 from copy import deepcopy
+from pathlib import Path
 from typing import Literal
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import requests
+from certifi import where
+from requests.adapters import HTTPAdapter
 from requests.sessions import Session
 
 from mcp_atlassian.jira.client import JiraClient
 from mcp_atlassian.jira.config import JiraConfig
 from mcp_atlassian.utils.ssl import NoProxyAdapter
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "directory", "unreadable", "malformed", "conflict"]
+)
+@pytest.mark.parametrize("from_env", [False, True])
+def test_invalid_ca_fails_before_client_creation(
+    tmp_path: Path,
+    failure: str,
+    from_env: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No authenticated request or credential log precedes CA validation."""
+    ca = tmp_path / "ca.pem"
+    ca.write_text("invalid PEM")
+    if failure == "missing":
+        ca = tmp_path / "missing.pem"
+    elif failure == "directory":
+        ca = tmp_path
+    config = JiraConfig(
+        url="https://sberworks.ru/jira/",
+        auth_type="pat",
+        personal_token="private-test-token",
+        ca_cert=str(ca),
+        ssl_verify=failure != "conflict",
+    )
+    with (
+        patch("mcp_atlassian.jira.client.Jira") as constructor,
+        patch.dict(
+            os.environ,
+            {
+                "JIRA_URL": config.url,
+                "JIRA_PERSONAL_TOKEN": config.personal_token,
+                "JIRA_CA_CERT": config.ca_cert,
+                "JIRA_SSL_VERIFY": str(config.ssl_verify),
+            },
+            clear=True,
+        ),
+    ):
+        if failure == "unreadable":
+            with patch.object(Path, "read_text", side_effect=PermissionError):
+                with pytest.raises(ValueError, match="JIRA_CA_CERT") as error:
+                    JiraClient(None if from_env else config)
+        else:
+            with pytest.raises(ValueError, match="JIRA_CA_CERT") as error:
+                JiraClient(None if from_env else config)
+    constructor.assert_not_called()
+    assert config.personal_token not in str(error.value)
+    assert config.personal_token not in caplog.text
+    if failure == "conflict":
+        assert "JIRA_SSL_VERIFY=false" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "base_url", ["https://sberworks.ru/jira", "https://sberworks.ru/jira/"]
+)
+@pytest.mark.parametrize("separate_key", [False, True])
+@pytest.mark.parametrize("wpad", [False, True])
+def test_real_pat_transport_ca_cert_and_context(
+    base_url: str,
+    separate_key: bool,
+    wpad: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real Atlassian API and direct-session calls retain PAT and TLS state."""
+    monkeypatch.setattr(
+        "mcp_atlassian.jira.client.logger.isEnabledFor", lambda _: False
+    )
+    monkeypatch.setenv("NO_PROXY", "")
+    config = JiraConfig(
+        url=base_url,
+        auth_type="pat",
+        personal_token="synthetic-pat",
+        ca_cert=where(),
+        client_cert="/test/combined.pem",
+        client_key="/test/key.pem" if separate_key else None,
+        no_proxy="sberworks.ru",
+        https_proxy=None if wpad else "http://proxy.example:8080",
+        proxy_wpad_enable=wpad,
+    )
+    from pypac import get_pac
+
+    pac = get_pac(
+        js='function FindProxyForURL(url, host) { return "PROXY proxy.example:8080"; }'
+    )
+    with patch("mcp_atlassian.utils.proxy._load_pac_file", return_value=pac):
+        client = JiraClient(config)
+    session = client.jira._session
+    expected_cert = (
+        (config.client_cert, config.client_key) if separate_key else config.client_cert
+    )
+    assert session.trust_env is False
+    assert session.verify == client.jira.verify_ssl == config.ca_cert
+    assert session.cert == client.jira.cert == expected_cert
+    from mcp_atlassian.utils.ssrf_adapter import SsrfPinningAdapter
+
+    assert isinstance(session.get_adapter(base_url), SsrfPinningAdapter)
+    assert session.hooks["response"]
+    calls = []
+
+    def record_send(
+        adapter: HTTPAdapter, request: requests.PreparedRequest, **kwargs: object
+    ) -> requests.Response:
+        calls.append((request, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"issues": [], "total": 0}'
+        response.request = request
+        response.url = request.url
+        return response
+
+    with patch("mcp_atlassian.utils.ssrf_adapter.SsrfPinningAdapter.send", record_send):
+        client.jira.myself()
+        client.jira.issue("TEST-1")
+        client.jira.jql("project = TEST", limit=1)
+        session.get(base_url.rstrip("/") + "/attachment", timeout=2)
+    assert [request.url.split("?")[0] for request, _ in calls] == [
+        "https://sberworks.ru/jira/rest/api/2/myself",
+        "https://sberworks.ru/jira/rest/api/2/issue/TEST-1",
+        "https://sberworks.ru/jira/rest/api/2/search",
+        "https://sberworks.ru/jira/attachment",
+    ]
+    assert "maxResults=1" in calls[2][0].url
+    for request, kwargs in calls:
+        assert request.headers["Authorization"] == "Bearer synthetic-pat"
+        assert kwargs["verify"] == config.ca_cert
+        assert kwargs["cert"] == expected_cert
+        assert not kwargs["proxies"]
 
 
 class DeepcopyMock(MagicMock):
@@ -59,6 +191,7 @@ def test_init_with_basic_auth():
             client_key=None,
             client_key_password=None,
             no_proxy=None,
+            ca_cert=None,
         )
 
         assert client.config == config
@@ -152,11 +285,11 @@ def test_http_hardening_survives_ssrf_pinning_mount(monkeypatch):
     from mcp_atlassian.utils.ssrf_adapter import SsrfPinningAdapter
 
     monkeypatch.setenv("ATLASSIAN_MAX_CONCURRENT_REQUESTS", "2")
+    monkeypatch.setenv("NO_PROXY", "")
     _reset_concurrency_semaphore_for_tests()
     try:
         with (
             patch("mcp_atlassian.jira.client.Jira") as mock_jira,
-            patch("mcp_atlassian.jira.client.configure_ssl_verification"),
         ):
             mock_jira.return_value._session = requests.Session()
             client = JiraClient(
@@ -165,11 +298,17 @@ def test_http_hardening_survives_ssrf_pinning_mount(monkeypatch):
                     auth_type="basic",
                     username="u",
                     api_token="t",
+                    ca_cert=where(),
+                    client_cert="/test/combined.pem",
+                    no_proxy="test.atlassian.net",
                 )
             )
 
-        adapter = client.jira._session.get_adapter("https://example.atlassian.net")
+        adapter = client.jira._session.get_adapter("https://test.atlassian.net")
         assert isinstance(adapter, SsrfPinningAdapter)
+        assert client.jira._session.verify == where()
+        assert client.jira._session.cert == "/test/combined.pem"
+        assert client.jira._session.hooks["response"]
         assert getattr(adapter, "_mcp_atlassian_throttled", False), (
             "concurrency wrapper must be present on the pinning adapter — "
             "hardening was applied before mount_ssrf_pinning replaced it"
@@ -215,6 +354,7 @@ def test_init_with_token_auth():
             client_key=None,
             client_key_password=None,
             no_proxy=None,
+            ca_cert=None,
         )
 
         assert client.config == config
@@ -228,6 +368,7 @@ def test_init_from_env():
         patch("mcp_atlassian.jira.client.configure_ssl_verification"),
     ):
         mock_config = MagicMock()
+        mock_config.ca_cert = None
         mock_config.auth_type = "basic"  # needed for the if condition
         mock_from_env.return_value = mock_config
 
@@ -583,6 +724,7 @@ def test_init_cert_auth() -> None:
             client_key=None,
             client_key_password=None,
             no_proxy=None,
+            ca_cert=None,
         )
 
 
