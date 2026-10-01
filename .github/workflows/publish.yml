@@ -8,6 +8,7 @@ on:
 
 jobs:
   pypi-publish:
+    if: github.repository == 'sooperset/mcp-atlassian' && github.event.release.prerelease != true
     name: Upload release to PyPI
     runs-on: ubuntu-latest
     environment:
