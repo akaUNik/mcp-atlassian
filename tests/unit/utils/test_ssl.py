@@ -4,6 +4,7 @@ import ssl
 from unittest.mock import MagicMock, patch
 
 import pytest
+from certifi import where
 from requests.adapters import HTTPAdapter
 from requests.sessions import Session
 
@@ -13,6 +14,49 @@ from mcp_atlassian.utils.ssl import (
     configure_ssl_verification,
 )
 from mcp_atlassian.utils.ssrf_adapter import SsrfPinningAdapter
+
+
+@pytest.mark.parametrize("separate_key", [False, True])
+@pytest.mark.parametrize("no_proxy", [None, "jira.example.com"])
+def test_explicit_ca_with_client_identity(
+    separate_key: bool,
+    no_proxy: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CA and client identity coexist with the optional proxy bypass adapter."""
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    session = Session()
+    verify = True
+    configure_ssl_verification(
+        "Jira",
+        "https://jira.example.com/jira",
+        session,
+        verify,
+        "/test/cert.pem",
+        "/test/key.pem" if separate_key else None,
+        None,
+        no_proxy,
+        where(),
+    )
+    assert session.verify == where()
+    assert session.cert == (
+        ("/test/cert.pem", "/test/key.pem") if separate_key else "/test/cert.pem"
+    )
+    adapter = session.get_adapter("https://jira.example.com/jira")
+    assert isinstance(adapter, NoProxyAdapter) == bool(no_proxy)
+    assert not isinstance(adapter, SSLIgnoreAdapter)
+
+
+def test_no_ca_preserves_confluence_session_verification() -> None:
+    """Existing shared-helper callers keep their session verification state."""
+    session = Session()
+    session.verify = "/existing/ca.pem"
+    configure_ssl_verification(
+        "Confluence", "https://wiki.example.com", session, ssl_verify=True
+    )
+    assert session.verify == "/existing/ca.pem"
+    assert session.cert is None
 
 
 def test_ssl_ignore_adapter_cert_verify():

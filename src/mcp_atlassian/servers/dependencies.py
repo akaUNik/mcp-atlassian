@@ -12,6 +12,7 @@ import os
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from cachetools import TTLCache
 from fastmcp import Context
@@ -444,12 +445,39 @@ def _with_request_passthrough_headers(
     return dataclasses.replace(config, custom_headers=custom_headers)
 
 
-def _get_header_pat_network_config(ctx: Context, spec: _ServiceSpec) -> dict[str, Any]:
+def _same_jira_instance(request_url: str, operator_url: str) -> bool:
+    """Match HTTPS Jira origins and context paths without ambiguous URL parts."""
+
+    def identity(url: str) -> tuple[str, int, str] | None:
+        if "?" in url or "#" in url:
+            return None
+        try:
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                return None
+            port = parsed.port if parsed.port is not None else 443
+            return (parsed.hostname.lower(), port, parsed.path.rstrip("/"))
+        except ValueError:
+            return None
+
+    requested = identity(request_url)
+    return requested is not None and requested == identity(operator_url)
+
+
+def _get_header_pat_network_config(
+    ctx: Context, spec: _ServiceSpec, request_url: str
+) -> dict[str, Any]:
     """Resolve operator-controlled network settings for header PAT requests.
 
     Args:
         ctx: FastMCP request context.
         spec: Service specification for Jira or Confluence.
+        request_url: Caller-selected instance URL, used to scope Jira TLS identity.
 
     Returns:
         SSL and proxy settings from the global config when available, otherwise
@@ -460,12 +488,22 @@ def _get_header_pat_network_config(ctx: Context, spec: _ServiceSpec) -> dict[str
     except ValueError:
         env_prefix = spec.name.upper()
         proxy_settings = get_proxy_settings_from_env(env_prefix)
-        return {
+        settings = {
             "ssl_verify": is_env_ssl_verify(f"{env_prefix}_SSL_VERIFY"),
             **proxy_settings,
         }
+        if spec.name == "Jira" and _same_jira_instance(
+            request_url, os.getenv("JIRA_URL", "")
+        ):
+            settings.update(
+                ca_cert=os.getenv("JIRA_CA_CERT", "").strip() or None,
+                client_cert=os.getenv("JIRA_CLIENT_CERT"),
+                client_key=os.getenv("JIRA_CLIENT_KEY"),
+                client_key_password=os.getenv("JIRA_CLIENT_KEY_PASSWORD"),
+            )
+        return settings
 
-    return {
+    settings = {
         "ssl_verify": global_config.ssl_verify,
         "http_proxy": global_config.http_proxy,
         "https_proxy": global_config.https_proxy,
@@ -474,6 +512,16 @@ def _get_header_pat_network_config(ctx: Context, spec: _ServiceSpec) -> dict[str
         "proxy_wpad_enable": global_config.proxy_wpad_enable,
         "proxy_wpad_url": global_config.proxy_wpad_url,
     }
+    if isinstance(global_config, JiraConfig) and _same_jira_instance(
+        request_url, global_config.url
+    ):
+        settings.update(
+            ca_cert=global_config.ca_cert,
+            client_cert=global_config.client_cert,
+            client_key=global_config.client_key,
+            client_key_password=global_config.client_key_password,
+        )
+    return settings
 
 
 def _create_and_validate(
@@ -866,7 +914,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 url=url_header_val,
                 auth_type="pat",
                 personal_token=token_header_val,
-                **_get_header_pat_network_config(ctx, spec),
+                **_get_header_pat_network_config(ctx, spec, url_header_val),
                 # Never forward instance-specific custom headers to a URL
                 # selected per request.
                 custom_headers=None,

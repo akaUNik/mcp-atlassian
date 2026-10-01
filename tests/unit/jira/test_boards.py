@@ -14,6 +14,7 @@ from mcp_atlassian.models.jira import JiraBoard
 def mock_config():
     """Fixture to create a mock JiraConfig instance."""
     config = MagicMock(spec=JiraConfig)
+    config.ca_cert = None
     config.url = "https://test.atlassian.net"
     config.username = "test@example.com"
     config.api_token = "test-token"
