@@ -72,7 +72,7 @@ This guide covers IDE integration, environment variables, and advanced configura
 }
 ```
 
-For mTLS, replace the personal token variables with client certificate variables. Use a combined certificate-and-private-key PEM in `*_CLIENT_CERT`, or use `*_CLIENT_CERT` and the matching `*_CLIENT_KEY` for separate files:
+For certificate-only mTLS, replace the personal token variables with client certificate variables. When the instance requires PAT plus mTLS, keep the personal token as well. Use a combined certificate-and-private-key PEM in `*_CLIENT_CERT`, or use `*_CLIENT_CERT` and the matching `*_CLIENT_KEY` for separate files:
 
 ```json
 {
@@ -93,6 +93,47 @@ For mTLS, replace the personal token variables with client certificate variables
 ```
 
 `JIRA_CLIENT_CERT` and `CONFLUENCE_CLIENT_CERT` can point to combined PEM files. If the private key is separate, set `JIRA_CLIENT_KEY` or `CONFLUENCE_CLIENT_KEY` as appropriate. Encrypted private keys aren't supported by the requests library, so decrypt them before starting MCP Atlassian instead of setting `JIRA_CLIENT_KEY_PASSWORD` or `CONFLUENCE_CLIENT_KEY_PASSWORD`.
+
+### SberWorks Jira: PAT plus mTLS
+
+Use a source checkout containing this feature. Preserve the `/jira/` context
+path and keep verification enabled:
+
+```json
+{
+  "mcpServers": {
+    "sberworks-jira": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/mcp-atlassian", "run", "mcp-atlassian"],
+      "env": {
+        "JIRA_URL": "https://sberworks.ru/jira/",
+        "JIRA_PERSONAL_TOKEN": "<YOUR_PAT>",
+        "JIRA_CLIENT_CERT": "/etc/mcp-atlassian/client-combined.pem",
+        "JIRA_CA_CERT": "/etc/mcp-atlassian/ca.pem",
+        "JIRA_SSL_VERIFY": "true",
+        "READ_ONLY_MODE": "true"
+      }
+    }
+  }
+}
+```
+
+`JIRA_CA_CERT` is optional and defaults to unset. Blank environment values are
+treated as unset. Supply a readable regular PEM CA bundle; an invalid bundle
+or combining it with `JIRA_SSL_VERIFY=false` fails before authenticated Jira
+requests. `JIRA_SSL_VERIFY` remains a boolean setting. The explicit CA works
+when PAT disables environment trust discovery, and can add trust material
+alongside the OS trust store when truststore integration is enabled.
+
+The combined PEM must contain the client certificate and its unencrypted
+private key. For separate files, also set `JIRA_CLIENT_KEY`. Paths must exist
+on the machine running the server. For Docker, mount the certificate directory
+read-only (for example, `-v /host/certs:/etc/mcp-atlassian:ro`) and use the paths
+inside the container in these variables. Set the same variables in the
+container environment. Keep real tokens and certificate contents outside Git.
+
+See [the read-only smoke procedure](/troubleshooting#sberworks-read-only-smoke-check)
+to verify authenticated compatibility with your gateway and Jira permissions.
 
 ### Single Service Configuration
 
@@ -147,6 +188,7 @@ For mTLS, replace the personal token variables with client certificate variables
 | `JIRA_CLIENT_KEY` | Jira mTLS private key PEM path when the certificate is separate (Server/DC) |
 | `JIRA_CLIENT_KEY_PASSWORD` | Not supported for encrypted private keys; decrypt the key before use |
 | `JIRA_SSL_VERIFY` | SSL verification (`true`/`false`) |
+| `JIRA_CA_CERT` | Optional readable PEM CA bundle; default unset (blank is unset); requires `JIRA_SSL_VERIFY=true` |
 | `CONFLUENCE_URL` | Confluence instance URL |
 | `CONFLUENCE_USERNAME` | Confluence username (email for Cloud) |
 | `CONFLUENCE_API_TOKEN` | Confluence API token (Cloud) |

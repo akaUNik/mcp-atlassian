@@ -144,6 +144,36 @@ Both transport types support per-request authentication where each user provides
 
 ### Server Setup for Multi-User
 
+Jira clients created with per-request PATs retain operator-managed TLS
+settings. This applies both to `Authorization: Token <PAT>` for the configured
+instance and to the existing URL/token headers:
+
+```json
+{
+  "mcpServers": {
+    "sberworks-jira": {
+      "url": "http://localhost:9000/mcp",
+      "headers": {
+        "Authorization": "Token <YOUR_PAT>",
+        "X-Atlassian-Jira-Url": "https://sberworks.ru/jira/",
+        "X-Atlassian-Jira-Personal-Token": "<YOUR_PAT>"
+      }
+    }
+  }
+}
+```
+
+The operator configures `JIRA_CA_CERT`, `JIRA_CLIENT_CERT`, and optional
+`JIRA_CLIENT_KEY` on the server, with `JIRA_SSL_VERIFY=true`. Certificate
+paths cannot be supplied through request headers. URL/header PAT clients
+inherit this CA and certificate identity only for the configured HTTPS Jira
+instance: hostname matching ignores case, omitted port and port 443 are
+equivalent, and trailing slashes on the context path are ignored. Schemes,
+other ports, and context paths must match; userinfo, query strings, and
+fragments prevent inheritance. An unrelated permitted target keeps the
+existing SSL/proxy policy without the operator's Jira CA or certificate.
+Existing URL validation, SSRF protection, and Confluence defaults still apply.
+
 <Steps>
   <Step title="Run OAuth Setup (if using OAuth)">
     ```bash

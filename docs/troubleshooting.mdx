@@ -3,6 +3,57 @@ title: "Troubleshooting"
 description: "Fix auth errors (401/403), field issues, rate limiting, SSL problems, and debug MCP Atlassian connections"
 ---
 
+## SberWorks read-only smoke check
+
+Configure the PAT, combined client PEM, and CA using the
+[SberWorks example](/configuration#sberworks-jira-pat-plus-mtls). Keep
+`JIRA_SSL_VERIFY=true` and `READ_ONLY_MODE=true`. Supply secrets through your
+local environment or MCP client configuration. For a container, mount the
+certificate directory read-only and use container paths; host paths are not
+automatically available inside it.
+
+From a source checkout with those environment variables set, run:
+
+```bash
+uv run python - <<'PY'
+import logging
+from requests.exceptions import ConnectionError, HTTPError, SSLError
+from mcp_atlassian.jira.client import JiraClient
+
+logging.basicConfig(level=logging.WARNING)
+try:
+    client = JiraClient()
+    client.jira.myself()
+    print("Current-user API: authenticated")
+    result = client.jira.jql("ORDER BY updated DESC", limit=1)
+    print("Bounded search: successful; returned", len(result.get("issues", [])), "issue(s)")
+except SSLError:
+    print("TLS failed: check CA chain, hostname, certificate expiry and client identity")
+    raise SystemExit(1)
+except HTTPError as error:
+    print("HTTP failure:", error.response.status_code if error.response is not None else "unknown")
+    raise SystemExit(1)
+except ConnectionError:
+    print("Connection failed: check network and proxy access")
+    raise SystemExit(1)
+except ValueError:
+    print("Configuration failed: check required credentials, readable CA PEM and unencrypted client key")
+    raise SystemExit(1)
+PY
+```
+
+The current-user GET and bounded issue search do not modify Jira. You can replace
+the search JQL with a query permitted for your account, or fetch a known
+permitted issue using `jira_get_issue` from the MCP client. Successful search
+with zero results still establishes API access. Do not print PATs, private
+keys, or full request headers when recording results.
+
+A TLS error happens before successful HTTP authentication; HTTP 401 means
+the gateway or Jira rejected authentication, and 403 means access was denied.
+Do not disable verification to work around these failures. An unauthenticated
+gateway 401 alone does not establish PAT plus mTLS Jira compatibility; record
+the authenticated current-user and issue/search results separately.
+
 ## Common Issues
 
 <AccordionGroup>
@@ -24,12 +75,12 @@ description: "Fix auth errors (401/403), field issues, rate limiting, SSL proble
     macOS Keychain, or the Linux system CA bundle are trusted
     automatically.
 
-    If you still see SSL errors with **self-signed** certificates that
-    are **not** in the OS trust store, disable verification:
+    For Jira certificates signed by a private CA outside the OS trust store,
+    configure an explicit PEM CA bundle and retain verification:
 
     ```bash
-    JIRA_SSL_VERIFY=false
-    CONFLUENCE_SSL_VERIFY=false
+    JIRA_CA_CERT=/etc/mcp-atlassian/ca.pem
+    JIRA_SSL_VERIFY=true
     ```
 
     To disable the OS trust store integration (fall back to the bundled
@@ -272,9 +323,8 @@ Header values containing sensitive information are automatically masked in logs.
 
     **Fix:**
     ```bash
-    # Disable SSL verification (not recommended for production)
-    JIRA_SSL_VERIFY=false
-    CONFLUENCE_SSL_VERIFY=false
+    JIRA_CA_CERT=/etc/mcp-atlassian/ca.pem
+    JIRA_SSL_VERIFY=true
     ```
 
     For mTLS (mutual TLS) authentication, set either a combined cert/key PEM:
@@ -287,6 +337,13 @@ Header values containing sensitive information are automatically masked in logs.
     JIRA_CLIENT_CERT=/path/to/client-cert.pem
     JIRA_CLIENT_KEY=/path/to/client-key.pem
     ```
+
+    Keep `JIRA_PERSONAL_TOKEN` configured if the instance requires PAT plus
+    mTLS. Keys must be unencrypted; `JIRA_CLIENT_KEY_PASSWORD` is unsupported.
+    Check that the CA and client files are readable by the server process,
+    contain PEM material, and include the required certificate chains.
+    `JIRA_CA_CERT` cannot be combined with `JIRA_SSL_VERIFY=false`.
+    Confluence continues to use its existing OS trust store configuration.
   </Accordion>
 
   <Accordion title="Connection Timeout">
