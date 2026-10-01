@@ -1,5 +1,8 @@
+import os
 import re
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,20 +25,32 @@ def test_dockerfile_injects_version_before_project_install() -> None:
 
 
 @pytest.mark.parametrize("fallback", ["0.0.0", "0.24.0b1"])
-def test_docker_version_rewrite_accepts_existing_release(fallback: str) -> None:
-    """A Docker tag replaces either an initial or already versioned fallback."""
+@pytest.mark.parametrize(
+    ("release_version", "python_version"),
+    [("0.24.0", "0.24.0"), ("0.24.0-beta.2", "0.24.0b2"), ("0.24.0-rc.1", "0.24.0rc1")],
+)
+def test_docker_version_rewrite_accepts_existing_release(
+    fallback: str, release_version: str, python_version: str, tmp_path: Path
+) -> None:
+    """Docker normalizes SemVer before replacing any existing Python fallback."""
     dockerfile = (ROOT / "Dockerfile").read_text()
-    match = re.search(r'sed -i "(.+)" pyproject.toml', dockerfile)
+    match = re.search(r"RUN (if .*?fi)", dockerfile, flags=re.DOTALL)
     assert match is not None
-    expression = match.group(1).replace(r"\"", '"').replace("$VERSION", "0.24.0-beta.2")
-    result = subprocess.run(
-        ["sed", "-e", expression],
-        input=f'fallback-version = "{fallback}"\n',
+    command = match.group(1).replace("\\\n", "")
+    command = command.replace("/app/.venv/bin/python", shlex.quote(sys.executable))
+    # macOS sed requires a backup suffix for -i; retain the same expression.
+    command = command.replace("sed -i ", "sed -i.bak ")
+    config = tmp_path / "pyproject.toml"
+    config.write_text(f'fallback-version = "{fallback}"\n')
+    subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env={**os.environ, "VERSION": release_version},
         text=True,
         capture_output=True,
         check=True,
     )
-    assert result.stdout == 'fallback-version = "0.24.0-beta.2"\n'
+    assert config.read_text() == f'fallback-version = "{python_version}"\n'
 
 
 def test_docker_workflow_passes_version_and_guards_manual_tag() -> None:

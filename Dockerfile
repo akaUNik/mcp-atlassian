@@ -28,6 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Then, copy the rest of the project source code and install it
 COPY . /app
 RUN if [ -n "$VERSION" ] && echo "$VERSION" | grep -qE '^[0-9]'; then \
+      VERSION=$(/app/.venv/bin/python -c 'import sys; from packaging.version import Version; print(Version(sys.argv[1]))' "$VERSION"); \
       sed -i "s/^fallback-version = .*/fallback-version = \"$VERSION\"/" pyproject.toml; \
     fi
 RUN --mount=type=cache,target=/root/.cache/uv \
