@@ -23,9 +23,11 @@
 
 ### Validation
 
-- Full pytest suite: 4008 passed, 251 skipped.
+- Full pytest suite after release preparation: 4010 passed, 251 skipped.
 - All repository pre-commit hooks passed, including isolated mypy.
 - Live SberWorks current-user and bounded search requests returned HTTP 200 with
   server certificate verification and client certificate authentication enabled.
 - Broader application-environment mypy retains 114 pre-existing diagnostics in
   unchanged FastMCP/E2E files; no new diagnostics were introduced.
+- Secret Scanning flags the synthetic `user:password` URI in the URL rejection
+  regression test. The release assets contain no operator PAT or local files.
